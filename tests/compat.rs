@@ -1,8 +1,9 @@
 //! Compat tests for rsomics-fastp vs fastp 0.20.x.
 //!
-//! Semantic note: fastp's exact output encoding changed between 0.20 and 1.x
-//! (adapter detection heuristics, default trimming settings). We gate on
-//! version 0.20 and compare read counts for SE mode.
+//! fastp's output encoding shifted between 0.20 and 1.x (adapter heuristics,
+//! default trimming), so the live oracle test gates on 0.20.x. With adapter
+//! trimming disabled on both sides the SE output is byte-identical, which the
+//! committed golden captures.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -53,16 +54,18 @@ fn se_filter_matches_fastp() {
     let our_out = tmp.path().join("ours_out.fastq");
     let fastp_out = tmp.path().join("fastp_out.fastq");
 
-    // Run ours
+    // Adapter trimming disabled on both sides so the comparison isolates the
+    // length/quality/N filters; with adapter heuristics out of the picture the
+    // SE output is byte-identical (see se_filter_matches_golden).
     let ours_status = ours()
         .args(["-i", r1_fixture().to_str().unwrap()])
         .args(["-o", our_out.to_str().unwrap()])
         .args(["--length-required", "15"])
+        .arg("--disable-adapter-trimming")
         .status()
         .unwrap();
     assert!(ours_status.success(), "rsomics-fastp failed");
 
-    // Run fastp 0.20
     let fastp_status = Command::new("fastp")
         .args(["-i", r1_fixture().to_str().unwrap()])
         .args(["-o", fastp_out.to_str().unwrap()])
@@ -72,15 +75,10 @@ fn se_filter_matches_fastp() {
         .unwrap();
     assert!(fastp_status.success(), "fastp failed");
 
-    let our_reads = count_reads(&our_out);
-    let fastp_reads = count_reads(&fastp_out);
-
-    // Both should agree on read count after same filters
-    // Note: adapter detection heuristics differ — we only compare count
-    // (not byte-exact output) given different adapter detection models.
     assert_eq!(
-        our_reads, fastp_reads,
-        "read count after SE filter: ours={our_reads}, fastp={fastp_reads}"
+        count_reads(&our_out),
+        count_reads(&fastp_out),
+        "read count after SE filter"
     );
 }
 
@@ -106,5 +104,34 @@ fn se_short_reads_filtered() {
     assert!(
         surviving < 4,
         "short read should have been filtered; got {surviving}"
+    );
+}
+
+// fastp_se_filtered.fastq was captured once from fastp 0.20.1 with
+// `--length_required 15 --disable_adapter_trimming`. Both sides disable adapter
+// trimming, so the SE-filtered output is byte-identical and CI can diff
+// ours-vs-golden without fastp installed.
+#[test]
+fn se_filter_matches_golden() {
+    let tmp = TempDir::new().unwrap();
+    let our_out = tmp.path().join("ours_out.fastq");
+
+    let status = ours()
+        .args(["-i", r1_fixture().to_str().unwrap()])
+        .args(["-o", our_out.to_str().unwrap()])
+        .args(["--length-required", "15"])
+        .arg("--disable-adapter-trimming")
+        .status()
+        .unwrap();
+    assert!(status.success(), "rsomics-fastp failed");
+
+    let ours = std::fs::read(&our_out).unwrap();
+    let golden = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/fastp_se_filtered.fastq"),
+    )
+    .unwrap();
+    assert_eq!(
+        ours, golden,
+        "SE-filtered output must match fastp 0.20.1 golden"
     );
 }
